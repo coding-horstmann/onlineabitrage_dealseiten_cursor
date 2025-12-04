@@ -15,6 +15,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
+import time
 
 # Load environment variables
 load_dotenv()
@@ -290,8 +291,8 @@ def requires_auth(f):
     return decorated
 
 
-def extract_product_info_with_gemini(item_title, item_description):
-    """Extract product name and price using Gemini AI"""
+def extract_product_info_with_gemini(item_title, item_description, retry_count=0):
+    """Extract product name and price using Gemini AI with rate limiting"""
     try:
         if not gemini_model:
             return item_title, 0.0
@@ -319,8 +320,33 @@ Beispiel:
 PRODUKT: Samsung Galaxy S23
 PREIS: 599.99"""
         
-        response = gemini_model.generate_content(prompt)
-        text = response.text
+        try:
+            response = gemini_model.generate_content(prompt)
+            text = response.text
+        except Exception as api_error:
+            error_str = str(api_error)
+            # Check for quota/rate limit errors
+            if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+                if retry_count < 3:
+                    # Extract retry delay if available
+                    wait_time = 30  # Default 30 seconds
+                    if "retry in" in error_str.lower():
+                        try:
+                            import re
+                            match = re.search(r'retry in (\d+)', error_str.lower())
+                            if match:
+                                wait_time = int(match.group(1)) + 5  # Add 5 seconds buffer
+                        except:
+                            pass
+                    
+                    logging.warning(f"Gemini quota exceeded, waiting {wait_time}s before retry {retry_count + 1}/3")
+                    time.sleep(wait_time)
+                    return extract_product_info_with_gemini(item_title, item_description, retry_count + 1)
+                else:
+                    logging.error(f"Gemini quota exceeded after 3 retries. Skipping extraction.")
+                    return item_title, 0.0
+            else:
+                raise  # Re-raise if it's not a quota error
         
         # Parse response
         product_name = item_title
