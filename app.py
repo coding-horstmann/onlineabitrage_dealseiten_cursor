@@ -71,7 +71,7 @@ if GEMINI_API_KEY:
 RSS_SOURCES = [
     'https://www.mydealz.de/rss/hot',
     'https://www.dealdoktor.de/feed/',
-    'https://www.schnaeppchenfuchs.de/feed'
+    'https://schnaeppchenfuchs.com/rss'
 ]
 
 # HTML Template for Dashboard
