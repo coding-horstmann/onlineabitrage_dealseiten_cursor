@@ -35,11 +35,19 @@ CRON_SECRET = os.getenv('CRON_SECRET', 'change-this-secret-token')
 
 # Initialize Supabase (lazy initialization)
 supabase: Client = None
+supabase_error = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logging.info("Supabase initialized successfully")
     except Exception as e:
+        supabase_error = str(e)
         logging.error(f"Failed to initialize Supabase: {e}")
+else:
+    if not SUPABASE_URL:
+        supabase_error = "SUPABASE_URL is not set"
+    elif not SUPABASE_KEY:
+        supabase_error = "SUPABASE_KEY is not set"
 
 # Initialize Gemini AI (lazy initialization)
 gemini_model = None
@@ -594,6 +602,27 @@ def cron_job():
 def health():
     """Health check endpoint"""
     return {"status": "ok"}, 200
+
+
+@app.route('/debug', methods=['GET'])
+@requires_auth
+def debug():
+    """Debug endpoint to check environment variables (without exposing secrets)"""
+    debug_info = {
+        "supabase_initialized": supabase is not None,
+        "supabase_error": supabase_error if 'supabase_error' in globals() else None,
+        "supabase_url_set": bool(SUPABASE_URL),
+        "supabase_url_preview": SUPABASE_URL[:20] + "..." if SUPABASE_URL else None,
+        "supabase_key_set": bool(SUPABASE_KEY),
+        "supabase_key_preview": SUPABASE_KEY[:10] + "..." if SUPABASE_KEY else None,
+        "gemini_initialized": gemini_model is not None,
+        "gemini_key_set": bool(GEMINI_API_KEY),
+        "ebay_app_id_set": bool(EBAY_APP_ID),
+        "gmail_user_set": bool(GMAIL_USER),
+        "gmail_password_set": bool(GMAIL_PASSWORD),
+        "cron_secret_set": bool(CRON_SECRET),
+    }
+    return debug_info, 200
 
 
 if __name__ == '__main__':
