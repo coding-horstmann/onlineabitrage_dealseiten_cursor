@@ -16,6 +16,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
 import time
+import re
+from urllib.parse import quote_plus
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Load environment variables
 load_dotenv()
@@ -70,6 +74,17 @@ if GEMINI_API_KEY:
         logging.info(f"Gemini initialized with model: {GEMINI_MODEL_NAME}")
     except Exception as e:
         logging.error(f"Failed to initialize Gemini: {e}")
+
+# Create requests session with retry strategy for eBay API
+session = requests.Session()
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("https://", adapter)
 
 # RSS Feed Sources
 RSS_SOURCES = [
@@ -348,32 +363,9 @@ def requires_auth(f):
 def extract_product_info_with_gemini(item_title, item_description, retry_count=0):
     """Extract product name and price using Gemini AI with rate limiting"""
     try:
-        # First try regex extraction (faster, no API calls)
-        import re
-        full_text = f"{item_title}\n{item_description[:1000]}"
-        price_patterns = [
-            r'(\d{1,3}(?:[.,]\d{2})?)\s*€',
-            r'€\s*(\d{1,3}(?:[.,]\d{2})?)',
-            r'(\d{1,3}[.,]\d{2})\s*(?:EUR|Euro)',
-            r'Preis[:\s]+(\d{1,3}(?:[.,]\d{2})?)',
-            r'(\d{1,3}[.,]\d{2})\s*Euro',
-            r'für\s+(\d{1,3}(?:[.,]\d{2})?)\s*€',
-            r'(\d{1,3}[.,]\d{2})\s*€\s*(?:inkl|versand|inkl\.|inklusive)',
-        ]
-        for pattern in price_patterns:
-            matches = re.findall(pattern, full_text, re.IGNORECASE)
-            if matches:
-                try:
-                    price_str = matches[0].replace(',', '.').strip()
-                    price = float(price_str)
-                    if price > 0 and price < 100000:  # Reasonable price range
-                        logging.info(f"✅ Regex price found: {price}€ for '{item_title[:60]}'")
-                        return item_title, price
-                except:
-                    continue
-        
-        # Fallback to Gemini only if regex fails
+        # Always use Gemini first (no regex pre-filtering)
         if not gemini_model:
+            logging.warning(f"Gemini model not initialized, skipping extraction for '{item_title[:60]}'")
             return item_title, 0.0
         
         # Combine title and description
@@ -385,19 +377,37 @@ Analysiere folgenden RSS-Feed-Eintrag und extrahiere den Produktnamen und Preis:
 
 {full_text}
 
-WICHTIG: 
-- Suche nach Preisen in verschiedenen Formaten: "19,99€", "19.99€", "19,99 €", "19.99 EUR", "19,99 Euro", "ab 19,99€", "statt 29,99€ jetzt 19,99€"
-- Wenn mehrere Preise vorhanden sind, nimm den niedrigsten/aktuellen Preis
-- Ignoriere Versandkosten
-- Wenn kein Preis gefunden wird, gib PREIS: 0 zurück
+WICHTIGE REGELN:
+1. NUR physische Produkte extrahieren - IGNORIERE:
+   - Handytarife, Mobilfunkverträge, SIM-Karten
+   - Reisen, Hotels, Flüge, Urlaubsangebote
+   - Abonnements, Streaming-Dienste, Software-Lizenzen
+   - Gutscheine, Rabattcodes, Cashback-Angebote
+   - Dienstleistungen, Versicherungen, Finanzprodukte
+   - Events, Konzerte, Tickets
+   
+2. Wenn es KEIN physisches Produkt ist, gib PREIS: 0 zurück
+
+3. Für physische Produkte:
+   - Suche nach Preisen in verschiedenen Formaten: "19,99€", "19.99€", "19,99 €", "19.99 EUR", "19,99 Euro", "ab 19,99€", "statt 29,99€ jetzt 19,99€"
+   - Wenn mehrere Preise vorhanden sind, nimm den niedrigsten/aktuellen Preis
+   - Ignoriere Versandkosten
+   - Wenn kein Preis gefunden wird, gib PREIS: 0 zurück
 
 Antworte NUR in diesem exakten Format (eine Zeile pro Feld):
 PRODUKT: [Produktname]
 PREIS: [Zahl ohne Währungssymbol, Punkt als Dezimaltrennzeichen]
 
-Beispiel:
+Beispiele für physische Produkte:
 PRODUKT: Samsung Galaxy S23
-PREIS: 599.99"""
+PREIS: 599.99
+
+PRODUKT: Bedsure Hoodiedecke
+PREIS: 19.99
+
+Wenn es kein physisches Produkt ist:
+PRODUKT: [Originaltitel]
+PREIS: 0"""
         
         try:
             response = gemini_model.generate_content(prompt)
@@ -452,40 +462,68 @@ PREIS: 599.99"""
                     logging.debug(f"Price parsing failed for '{line}': {e}")
                     price = 0.0
         
-        # Fallback: Try to find price directly in text using regex
+        # Fallback: Only use regex if Gemini returned price 0 (might be non-physical product or parsing error)
+        # But only if we're sure it's a physical product based on keywords
         if price == 0.0:
-            import re
-            # Look for common price patterns
-            price_patterns = [
-                r'(\d{1,3}(?:[.,]\d{2})?)\s*€',
-                r'€\s*(\d{1,3}(?:[.,]\d{2})?)',
-                r'(\d{1,3}[.,]\d{2})\s*(?:EUR|Euro)',
-                r'Preis[:\s]+(\d{1,3}(?:[.,]\d{2})?)',
-                r'(\d{1,3}[.,]\d{2})\s*Euro',
-            ]
-            for pattern in price_patterns:
-                matches = re.findall(pattern, full_text, re.IGNORECASE)
-                if matches:
-                    try:
-                        price_str = matches[0].replace(',', '.')
-                        price = float(price_str)
-                        logging.debug(f"Found price via regex: {price}€")
-                        break
-                    except:
-                        continue
+            # Check if it might be a physical product that Gemini missed
+            physical_keywords = ['produkt', 'artikel', 'ware', 'gerät', 'kamera', 'laptop', 'smartphone', 
+                                'kopfhörer', 'buch', 'kleidung', 'schuhe', 'möbel', 'decke', 'kissen',
+                                'spielzeug', 'spiel', 'konsolen', 'monitor', 'tastatur', 'maus']
+            is_likely_physical = any(keyword in full_text.lower() for keyword in physical_keywords)
+            
+            # Only try regex fallback if it seems like a physical product
+            if is_likely_physical:
+                import re
+                # Look for common price patterns
+                price_patterns = [
+                    r'(\d{1,3}(?:[.,]\d{2})?)\s*€',
+                    r'€\s*(\d{1,3}(?:[.,]\d{2})?)',
+                    r'(\d{1,3}[.,]\d{2})\s*(?:EUR|Euro)',
+                    r'Preis[:\s]+(\d{1,3}(?:[.,]\d{2})?)',
+                    r'(\d{1,3}[.,]\d{2})\s*Euro',
+                ]
+                for pattern in price_patterns:
+                    matches = re.findall(pattern, full_text, re.IGNORECASE)
+                    if matches:
+                        try:
+                            price_str = matches[0].replace(',', '.')
+                            price = float(price_str)
+                            logging.debug(f"Regex fallback found price: {price}€ for '{item_title[:50]}'")
+                            break
+                        except:
+                            continue
         
-        logging.debug(f"Gemini extraction: '{item_title[:50]}' -> Product: '{product_name[:50]}', Price: {price}€")
+        logging.info(f"Gemini extraction: '{item_title[:50]}' -> Product: '{product_name[:50]}', Price: {price}€")
         return product_name, price
     except Exception as e:
         logging.error(f"Gemini extraction error for '{item_title[:50]}': {e}")
         return item_title, 0.0
 
 
+def clean_product_name_for_ebay(product_name):
+    """Clean product name for eBay API query - remove emojis and special characters"""
+    if not product_name:
+        return ""
+    # Remove emojis and special unicode characters
+    # Keep only alphanumeric, spaces, and common punctuation
+    cleaned = re.sub(r'[^\w\s\-.,()€$]', '', product_name)
+    # Remove multiple spaces
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    # Limit length
+    return cleaned[:100]
+
+
 def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None):
-    """Get average market price from eBay Browse API"""
+    """Get average market price from eBay Browse API with retry logic"""
     try:
         if not EBAY_APP_ID:
             logging.warning("EBAY_APP_ID not set, skipping eBay query")
+            return None
+        
+        # Clean product name for eBay query
+        cleaned_name = clean_product_name_for_ebay(product_name)
+        if not cleaned_name or len(cleaned_name) < 3:
+            logging.warning(f"Product name too short after cleaning: '{product_name[:50]}'")
             return None
         
         # Use eBay Finding API (simpler, but deprecated)
@@ -496,7 +534,7 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
             "SECURITY-APPNAME": EBAY_APP_ID,
             "RESPONSE-DATA-FORMAT": "JSON",
             "REST-PAYLOAD": "",
-            "keywords": product_name[:100],  # Limit length
+            "keywords": cleaned_name,
             "itemFilter(0).name": "Condition",
             "itemFilter(0).value": "New",
             "itemFilter(1).name": "SoldItemsOnly",
@@ -504,7 +542,8 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
             "paginationInput.entriesPerPage": "20"
         }
         
-        response = requests.get(finding_url, params=finding_params, timeout=10)
+        # Use session with retry strategy
+        response = session.get(finding_url, params=finding_params, timeout=15, verify=True)
         items_found = 0
         ebay_price_result = None
         error_msg = None
@@ -655,11 +694,16 @@ def process_rss_feeds(force_time_window=False):
             }
             supabase.table('logs').insert(log_entry).execute()
             
-            # Parse RSS feed
+            # Parse RSS feed with better error handling
             feed = feedparser.parse(source_url)
             
+            # Log warnings but don't fail completely if feed has minor issues
             if feed.bozo:
-                raise Exception(f"Feed parsing error: {feed.bozo_exception}")
+                bozo_msg = str(feed.bozo_exception) if feed.bozo_exception else "Unknown parsing error"
+                logging.warning(f"Feed parsing warning for {source_url}: {bozo_msg}")
+                # Continue processing if we have entries despite the warning
+                if not feed.entries or len(feed.entries) == 0:
+                    raise Exception(f"Feed parsing error: {bozo_msg}")
             
             feed_products = len(feed.entries)
             total_products_found += feed_products
@@ -900,6 +944,21 @@ def debug():
         "cron_secret_set": bool(CRON_SECRET),
     }
     return debug_info, 200
+
+
+@app.route('/favicon.ico', methods=['GET'])
+def favicon():
+    """Return favicon as SVG emoji"""
+    svg_icon = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <text y="0.9em" font-size="90">🤖</text>
+    </svg>"""
+    return Response(svg_icon, mimetype='image/svg+xml')
+
+
+@app.route('/favicon.png', methods=['GET'])
+def favicon_png():
+    """Redirect favicon.png to favicon.ico"""
+    return Response("", status=404)
 
 
 @app.route('/test-gemini', methods=['GET'])
