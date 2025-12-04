@@ -540,9 +540,13 @@ def process_rss_feeds():
             feed_products = len(feed.entries)
             total_products_found += feed_products
             
-            # Process each entry
-            for entry in feed.entries:
+            # Process each entry with rate limiting
+            for idx, entry in enumerate(feed.entries):
                 try:
+                    # Rate limiting: wait between Gemini API calls to avoid quota issues
+                    if idx > 0:
+                        time.sleep(1)  # Wait 1 second between requests
+                    
                     # Extract product info with Gemini
                     product_name, rss_price = extract_product_info_with_gemini(
                         entry.get('title', ''),
@@ -717,12 +721,44 @@ def debug():
         "supabase_key_preview": SUPABASE_KEY[:10] + "..." if SUPABASE_KEY else None,
         "gemini_initialized": gemini_model is not None,
         "gemini_key_set": bool(GEMINI_API_KEY),
+        "gemini_key_preview": GEMINI_API_KEY[:10] + "..." if GEMINI_API_KEY else None,
         "ebay_app_id_set": bool(EBAY_APP_ID),
         "gmail_user_set": bool(GMAIL_USER),
         "gmail_password_set": bool(GMAIL_PASSWORD),
         "cron_secret_set": bool(CRON_SECRET),
     }
     return debug_info, 200
+
+
+@app.route('/test-gemini', methods=['GET'])
+@requires_auth
+def test_gemini():
+    """Test endpoint to verify Gemini API is working"""
+    try:
+        if not gemini_model:
+            return {
+                "error": "Gemini not initialized",
+                "gemini_key_set": bool(GEMINI_API_KEY),
+                "gemini_key_preview": GEMINI_API_KEY[:10] + "..." if GEMINI_API_KEY else None
+            }, 500
+        
+        # Simple test query
+        test_prompt = "Extrahiere aus folgendem Text den Preis: 'Samsung Galaxy S23 für 599,99€'"
+        response = gemini_model.generate_content(test_prompt)
+        
+        return {
+            "status": "success",
+            "gemini_working": True,
+            "test_response": response.text[:200],
+            "gemini_model": "gemini-2.0-flash-exp"
+        }, 200
+    except Exception as e:
+        return {
+            "status": "error",
+            "gemini_working": False,
+            "error": str(e),
+            "gemini_key_set": bool(GEMINI_API_KEY)
+        }, 500
 
 
 if __name__ == '__main__':
