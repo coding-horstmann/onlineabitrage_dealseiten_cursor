@@ -60,9 +60,9 @@ else:
         supabase_error = "SUPABASE_KEY is not set"
 
 # Initialize Gemini AI (lazy initialization)
-# Using gemini-1.5-flash instead of gemini-2.0-flash-exp for better free tier compatibility
+# Using gemini-2.0-flash-lite for best free tier compatibility (30 RPM, 1M TPM)
 gemini_model = None
-GEMINI_MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')  # Default to 1.5-flash for free tier
+GEMINI_MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-lite')  # Default to 2.0-flash-lite for free tier (30 RPM)
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
