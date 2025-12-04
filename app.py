@@ -460,7 +460,7 @@ PREIS 1: 54.99"""
                     return extract_product_info_with_gemini(item_title, item_description, retry_count + 1)
                 else:
                     logging.error(f"Gemini quota exceeded after 3 retries. Skipping extraction.")
-                    return item_title, 0.0
+                    return [(item_title, 0.0)]
             else:
                 raise  # Re-raise if it's not a quota error
         
@@ -535,44 +535,10 @@ PREIS 1: 54.99"""
         if not products:
             products = [(item_title, 0.0)]
         
-        # Return first product for backward compatibility, but log all products
+        # Log extraction results
         if len(products) > 1:
             logging.info(f"Gemini found {len(products)} products: {[p[0][:30] for p in products]}")
         
-        product_name, price = products[0]
-        
-        # Fallback: Only use regex if Gemini returned price 0 (might be non-physical product or parsing error)
-        # But only if we're sure it's a physical product based on keywords
-        if price == 0.0:
-            # Check if it might be a physical product that Gemini missed
-            physical_keywords = ['produkt', 'artikel', 'ware', 'gerät', 'kamera', 'laptop', 'smartphone', 
-                                'kopfhörer', 'buch', 'kleidung', 'schuhe', 'möbel', 'decke', 'kissen',
-                                'spielzeug', 'spiel', 'konsolen', 'monitor', 'tastatur', 'maus']
-            is_likely_physical = any(keyword in full_text.lower() for keyword in physical_keywords)
-            
-            # Only try regex fallback if it seems like a physical product
-            if is_likely_physical:
-                import re
-                # Look for common price patterns
-                price_patterns = [
-                    r'(\d{1,3}(?:[.,]\d{2})?)\s*€',
-                    r'€\s*(\d{1,3}(?:[.,]\d{2})?)',
-                    r'(\d{1,3}[.,]\d{2})\s*(?:EUR|Euro)',
-                    r'Preis[:\s]+(\d{1,3}(?:[.,]\d{2})?)',
-                    r'(\d{1,3}[.,]\d{2})\s*Euro',
-                ]
-                for pattern in price_patterns:
-                    matches = re.findall(pattern, full_text, re.IGNORECASE)
-                    if matches:
-                        try:
-                            price_str = matches[0].replace(',', '.')
-                            price = float(price_str)
-                            logging.debug(f"Regex fallback found price: {price}€ for '{item_title[:50]}'")
-                            break
-                        except:
-                            continue
-        
-        # Log extraction results
         if len(products) > 0:
             product_names = ', '.join([p[0][:30] for p in products])
             logging.info(f"Gemini extraction: '{item_title[:50]}' -> Products: {product_names}, Prices: {[p[1] for p in products]}")
