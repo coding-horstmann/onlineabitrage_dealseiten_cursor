@@ -31,6 +31,7 @@ GMAIL_PASSWORD = os.getenv('GMAIL_PASSWORD')
 ALERT_EMAIL = os.getenv('ALERT_EMAIL', GMAIL_USER)
 BASIC_AUTH_USER = os.getenv('BASIC_AUTH_USER', 'admin')
 BASIC_AUTH_PASSWORD = os.getenv('BASIC_AUTH_PASSWORD', 'changeme')
+CRON_SECRET = os.getenv('CRON_SECRET', 'change-this-secret-token')
 
 # Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -544,10 +545,15 @@ def dashboard():
 
 @app.route('/api/cron', methods=['GET', 'POST'])
 def cron_job():
-    """Cron job endpoint for Vercel"""
+    """Cron job endpoint - can be called by external cron services"""
     try:
-        # Verify it's called by Vercel Cron (optional security check)
-        # You can add a secret header check here if needed
+        # Security check: Verify secret token
+        provided_secret = request.headers.get('X-Cron-Secret') or request.args.get('secret')
+        if provided_secret != CRON_SECRET:
+            return {
+                "status": "error",
+                "message": "Unauthorized - Invalid secret token"
+            }, 401
         
         result = process_rss_feeds()
         return {
