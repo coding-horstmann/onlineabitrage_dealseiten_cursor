@@ -42,11 +42,16 @@ supabase: Client = None
 supabase_error = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Remove trailing slash if present and ensure proper format
+        supabase_url_clean = SUPABASE_URL.rstrip('/')
+        # Simple initialization without extra options
+        supabase = create_client(supabase_url_clean, SUPABASE_KEY)
         logging.info("Supabase initialized successfully")
     except Exception as e:
         supabase_error = str(e)
         logging.error(f"Failed to initialize Supabase: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
 else:
     if not SUPABASE_URL:
         supabase_error = "SUPABASE_URL is not set"
