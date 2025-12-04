@@ -514,7 +514,8 @@ def clean_product_name_for_ebay(product_name):
 
 
 def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None):
-    """Get average market price from eBay Browse API with retry logic"""
+    """Get market price from eBay API with multiple price statistics (lowest, median, average)
+    Searches both New and Used items from the last 90 days"""
     try:
         if not EBAY_APP_ID:
             logging.warning("EBAY_APP_ID not set, skipping eBay query")
@@ -526,58 +527,99 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
             logging.warning(f"Product name too short after cleaning: '{product_name[:50]}'")
             return None
         
-        # Use eBay Finding API (simpler, but deprecated)
+        # Use eBay Finding API - search for completed items (sold items)
+        # Search both New and Used conditions to get more results
         finding_url = "https://svcs.ebay.de/services/search/FindingService/v1"
-        finding_params = {
-            "OPERATION-NAME": "findCompletedItems",
-            "SERVICE-VERSION": "1.0.0",
-            "SECURITY-APPNAME": EBAY_APP_ID,
-            "RESPONSE-DATA-FORMAT": "JSON",
-            "REST-PAYLOAD": "",
-            "keywords": cleaned_name,
-            "itemFilter(0).name": "Condition",
-            "itemFilter(0).value": "New",
-            "itemFilter(1).name": "SoldItemsOnly",
-            "itemFilter(1).value": "true",
-            "paginationInput.entriesPerPage": "20"
-        }
         
-        # Use session with retry strategy
-        response = session.get(finding_url, params=finding_params, timeout=15, verify=True)
+        all_prices = []
         items_found = 0
-        ebay_price_result = None
         error_msg = None
         
-        if response.status_code == 200:
-            data = response.json()
-            prices = []
-            
+        # Try both "New" and "Used" conditions to maximize results
+        for condition in ["New", "Used"]:
             try:
-                items = data.get('findCompletedItemsResponse', [{}])[0].get('searchResult', [{}])[0].get('item', [])
-                items_found = len(items)
-                for item in items:
-                    selling_status = item.get('sellingStatus', [{}])[0]
-                    current_price = selling_status.get('currentPrice', [{}])[0]
-                    price_value = float(current_price.get('__value__', 0))
-                    if price_value > 0:
-                        prices.append(price_value)
+                finding_params = {
+                    "OPERATION-NAME": "findCompletedItems",
+                    "SERVICE-VERSION": "1.0.0",
+                    "SECURITY-APPNAME": EBAY_APP_ID,
+                    "RESPONSE-DATA-FORMAT": "JSON",
+                    "REST-PAYLOAD": "",
+                    "keywords": cleaned_name,
+                    "itemFilter(0).name": "Condition",
+                    "itemFilter(0).value": condition,
+                    "itemFilter(1).name": "SoldItemsOnly",
+                    "itemFilter(1).value": "true",
+                    # Search items sold in the last 90 days (more recent = more relevant)
+                    "itemFilter(2).name": "EndTimeFrom",
+                    "itemFilter(2).value": "",  # Will be set to 90 days ago
+                    "paginationInput.entriesPerPage": "50"  # Increased to get more data
+                }
+                
+                # Set EndTimeFrom to 90 days ago
+                from datetime import datetime, timedelta
+                end_time_from = datetime.now() - timedelta(days=90)
+                finding_params["itemFilter(2).value"] = end_time_from.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                
+                # Use session with retry strategy
+                response = session.get(finding_url, params=finding_params, timeout=15, verify=True)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    try:
+                        items = data.get('findCompletedItemsResponse', [{}])[0].get('searchResult', [{}])[0].get('item', [])
+                        items_found += len(items)
+                        for item in items:
+                            selling_status = item.get('sellingStatus', [{}])[0]
+                            current_price = selling_status.get('currentPrice', [{}])[0]
+                            price_value = float(current_price.get('__value__', 0))
+                            if price_value > 0:
+                                all_prices.append(price_value)
+                    except Exception as e:
+                        if not error_msg:
+                            error_msg = str(e)
+                        logging.debug(f"Error parsing eBay response for {condition}: {e}")
+                else:
+                    if not error_msg:
+                        error_msg = f"HTTP {response.status_code}"
+                    logging.debug(f"eBay API returned status {response.status_code} for {condition} items")
+                
+                # Small delay between requests to avoid rate limiting
+                time.sleep(0.5)
             except Exception as e:
-                error_msg = str(e)
-                logging.debug(f"Error parsing eBay response: {e}")
-                pass
+                if not error_msg:
+                    error_msg = str(e)
+                logging.debug(f"Error querying eBay for {condition} items: {e}")
+        
+        # Calculate price statistics
+        ebay_price_result = None
+        price_stats = {}
+        
+        if all_prices:
+            all_prices.sort()  # Sort for median calculation
+            price_stats = {
+                "lowest": min(all_prices),
+                "highest": max(all_prices),
+                "average": sum(all_prices) / len(all_prices),
+                "median": all_prices[len(all_prices) // 2] if len(all_prices) > 0 else 0,
+                "count": len(all_prices)
+            }
             
-            if prices:
-                avg_price = sum(prices) / len(prices)
-                # eBay fees: ~10% for most categories
-                fees = avg_price * 0.10
-                net_price = avg_price - fees
-                ebay_price_result = net_price
-                logging.debug(f"eBay query for '{product_name[:50]}': {len(prices)} items, avg={avg_price:.2f}€, net={net_price:.2f}€")
-            else:
-                logging.debug(f"eBay query for '{product_name[:50]}': No prices found")
+            # Use median price as it's less affected by outliers
+            # Alternative: use average if you prefer
+            median_price = price_stats["median"]
+            
+            # eBay fees: ~10% for most categories
+            fees = median_price * 0.10
+            net_price = median_price - fees
+            ebay_price_result = net_price
+            
+            logging.info(f"eBay query '{product_name[:50]}': {len(all_prices)} items | "
+                        f"Lowest: {price_stats['lowest']:.2f}€ | "
+                        f"Median: {price_stats['median']:.2f}€ | "
+                        f"Avg: {price_stats['average']:.2f}€ | "
+                        f"Net (median-fees): {net_price:.2f}€")
         else:
-            error_msg = f"HTTP {response.status_code}"
-            logging.warning(f"eBay API returned status {response.status_code} for '{product_name[:50]}'")
+            logging.debug(f"eBay query for '{product_name[:50]}': No prices found (searched New + Used)")
         
         # Save eBay query to database for tracking
         if log_id and supabase:
@@ -695,7 +737,30 @@ def process_rss_feeds(force_time_window=False):
             supabase.table('logs').insert(log_entry).execute()
             
             # Parse RSS feed with better error handling
-            feed = feedparser.parse(source_url)
+            # Try to fix common XML issues before parsing
+            try:
+                feed = feedparser.parse(source_url)
+            except Exception as parse_error:
+                logging.warning(f"Initial feed parse failed for {source_url}: {parse_error}")
+                # Try downloading and fixing common issues
+                try:
+                    import requests
+                    feed_response = requests.get(source_url, timeout=10)
+                    if feed_response.status_code == 200:
+                        # Fix double-encoded HTML entities (e.g., &amp;amp; -> &amp;)
+                        feed_content = feed_response.text
+                        feed_content = feed_content.replace('&amp;amp;', '&amp;')
+                        feed_content = feed_content.replace('&amp;lt;', '&lt;')
+                        feed_content = feed_content.replace('&amp;gt;', '&gt;')
+                        feed_content = feed_content.replace('&amp;quot;', '&quot;')
+                        feed_content = feed_content.replace('&amp;apos;', '&apos;')
+                        # Parse the fixed content
+                        feed = feedparser.parse(feed_content)
+                    else:
+                        raise Exception(f"Failed to download feed: HTTP {feed_response.status_code}")
+                except Exception as download_error:
+                    logging.error(f"Failed to download and fix feed {source_url}: {download_error}")
+                    raise Exception(f"Feed parsing error: {parse_error}")
             
             # Log warnings but don't fail completely if feed has minor issues
             if feed.bozo:
