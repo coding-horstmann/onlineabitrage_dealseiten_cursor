@@ -590,7 +590,7 @@ def send_email_alert(deal):
         logging.error(f"Email sending error: {e}")
 
 
-def process_rss_feeds():
+def process_rss_feeds(force_time_window=False):
     """Main function to process RSS feeds and find arbitrage opportunities"""
     if not supabase:
         raise Exception("Supabase not initialized. Check SUPABASE_URL and SUPABASE_KEY.")
@@ -601,9 +601,9 @@ def process_rss_feeds():
     current_hour = datetime.now().hour
     
     # Check if within allowed time window (8:00 - 20:00)
-    if current_hour < 8 or current_hour >= 20:
+    if not force_time_window and (current_hour < 8 or current_hour >= 20):
         logging.info(f"Skipping cron job - outside time window (current hour: {current_hour})")
-        return {"status": "skipped", "message": "Outside time window"}
+        return {"status": "skipped", "message": f"Outside time window (current hour: {current_hour}, allowed: 8:00-20:00)"}
     
     total_products_found = 0
     total_deals_found = 0
