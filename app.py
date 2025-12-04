@@ -363,19 +363,20 @@ def requires_auth(f):
 
 
 def extract_product_info_with_gemini(item_title, item_description, retry_count=0):
-    """Extract product name and price using Gemini AI with rate limiting"""
+    """Extract product names and prices using Gemini AI with rate limiting
+    Returns list of (product_name, price) tuples - can contain multiple products"""
     try:
         # Always use Gemini first (no regex pre-filtering)
         if not gemini_model:
             logging.warning(f"Gemini model not initialized, skipping extraction for '{item_title[:60]}'")
-            return item_title, 0.0
+            return [(item_title, 0.0)]
         
         # Combine title and description
         full_text = f"{item_title}\n{item_description[:1000]}"
         
         prompt = f"""Du bist ein Experte für die Extraktion von Produktinformationen aus deutschen Deal-Seiten.
 
-Analysiere folgenden RSS-Feed-Eintrag und extrahiere den Produktnamen und Preis:
+Analysiere folgenden RSS-Feed-Eintrag und extrahiere ALLE physischen Produkte mit ihren Preisen:
 
 {full_text}
 
@@ -387,29 +388,53 @@ WICHTIGE REGELN:
    - Gutscheine, Rabattcodes, Cashback-Angebote
    - Dienstleistungen, Versicherungen, Finanzprodukte
    - Events, Konzerte, Tickets
-   
-2. Wenn es KEIN physisches Produkt ist, gib PREIS: 0 zurück
 
-3. Für physische Produkte:
-   - Suche nach Preisen in verschiedenen Formaten: "19,99€", "19.99€", "19,99 €", "19.99 EUR", "19,99 Euro", "ab 19,99€", "statt 29,99€ jetzt 19,99€"
+2. WENN MEHRERE PRODUKTE IM TEXT SIND (z.B. "inkl.", "+", "GRATIS", "und"):
+   - Extrahiere JEDES Produkt EINZELN
+   - Jedes Produkt bekommt den GESAMTEN Preis (nicht aufgeteilt)
+   - Beispiel: "Akku-Heissluftgebläse Bosch GHG 18V-50 inkl. L-BOXX + GRATIS Akkupack ProCORE18V 4.0Ah für 164,90€"
+     → PRODUKT 1: Bosch Professional GHG 18V-50 (Hauptprodukt)
+     → PRODUKT 2: Bosch Professional ProCORE18V 4.0Ah (Zugabeartikel)
+     → Beide bekommen PREIS: 164.90
+
+3. PRODUKTNAMEN OPTIMIEREN für eBay-Suche:
+   - Entferne Marketing-Text: "GRATIS", "inkl.", "inklusive", "mit", "und", "+", "Zugabeartikel", "Geschenk"
+   - Fokussiere auf: Marke + Modell/Produktname
+   - Beispiele:
+     * "Akku-Heissluftgebläse Bosch Professional GHG 18V-50" → "Bosch Professional GHG 18V-50"
+     * "Mr. Robot - Komplette Serie - Bluray" → "Mr Robot Komplette Serie Bluray"
+     * "Samsung Galaxy S23 256GB" → "Samsung Galaxy S23"
+   - Verwende KURZE, PRÄZISE Namen (max. 8-10 Wörter)
+
+4. PREIS-Extraktion:
+   - Suche nach Preisen: "19,99€", "19.99€", "19,99 €", "19.99 EUR", "ab 19,99€", "statt 29,99€ jetzt 19,99€"
    - Wenn mehrere Preise vorhanden sind, nimm den niedrigsten/aktuellen Preis
    - Ignoriere Versandkosten
    - Wenn kein Preis gefunden wird, gib PREIS: 0 zurück
 
-Antworte NUR in diesem exakten Format (eine Zeile pro Feld):
-PRODUKT: [Produktname]
-PREIS: [Zahl ohne Währungssymbol, Punkt als Dezimaltrennzeichen]
+Antworte NUR in diesem exakten Format (ein Produkt pro Block):
+PRODUKT 1: [Kurzer, präziser Produktname für eBay-Suche]
+PREIS 1: [Zahl ohne Währungssymbol, Punkt als Dezimaltrennzeichen]
 
-Beispiele für physische Produkte:
-PRODUKT: Samsung Galaxy S23
-PREIS: 599.99
+PRODUKT 2: [Nur wenn ein zweites Produkt vorhanden ist]
+PREIS 2: [Gleicher Preis wie PREIS 1]
 
-PRODUKT: Bedsure Hoodiedecke
-PREIS: 19.99
+Wenn es KEIN physisches Produkt ist:
+PRODUKT 1: [Originaltitel]
+PREIS 1: 0
 
-Wenn es kein physisches Produkt ist:
-PRODUKT: [Originaltitel]
-PREIS: 0"""
+Beispiele:
+Eingabe: "Akku-Heissluftgebläse Bosch Professional GHG 18V-50 inkl. L-BOXX + GRATIS Akkupack Bosch Professional ProCORE18V 4.0Ah für 164,90€"
+Ausgabe:
+PRODUKT 1: Bosch Professional GHG 18V-50
+PREIS 1: 164.90
+PRODUKT 2: Bosch Professional ProCORE18V 4.0Ah
+PREIS 2: 164.90
+
+Eingabe: "Mr. Robot - Komplette Serie - Bluray für 54,99€"
+Ausgabe:
+PRODUKT 1: Mr Robot Komplette Serie Bluray
+PREIS 1: 54.99"""
         
         try:
             response = gemini_model.generate_content(prompt)
@@ -439,30 +464,82 @@ PREIS: 0"""
             else:
                 raise  # Re-raise if it's not a quota error
         
-        # Parse response
-        product_name = item_title
-        price = 0.0
+        # Parse response - extract multiple products
+        products = []  # List of (product_name, price) tuples
         
         # Try multiple parsing strategies
+        current_product = None
+        current_price = None
+        
         for line in text.split('\n'):
             line = line.strip()
-            if 'PRODUKT:' in line.upper():
-                product_name = line.split(':', 1)[1].strip() if ':' in line else line.replace('PRODUKT', '').strip()
-            elif 'PREIS:' in line.upper():
+            line_upper = line.upper()
+            
+            # Check for product lines (PRODUKT 1:, PRODUKT 2:, etc.)
+            if 'PRODUKT' in line_upper and ':' in line:
+                # Save previous product if exists
+                if current_product and current_price is not None:
+                    products.append((current_product, current_price))
+                
+                # Extract new product name
+                product_part = line.split(':', 1)[1].strip() if ':' in line else line.replace('PRODUKT', '').strip()
+                # Remove "PRODUKT 1:", "PRODUKT 2:" etc.
+                product_part = re.sub(r'^PRODUKT\s*\d+\s*:', '', product_part, flags=re.IGNORECASE).strip()
+                current_product = product_part if product_part else item_title
+                current_price = None
+            
+            # Check for price lines (PREIS 1:, PREIS 2:, etc.)
+            elif 'PREIS' in line_upper and ':' in line:
                 try:
                     price_part = line.split(':', 1)[1].strip() if ':' in line else line.replace('PREIS', '').strip()
+                    # Remove "PREIS 1:", "PREIS 2:" etc.
+                    price_part = re.sub(r'^PREIS\s*\d+\s*:', '', price_part, flags=re.IGNORECASE).strip()
                     # Remove currency symbols and clean
-                    price_part = price_part.replace('€', '').replace('EUR', '').replace('Euro', '').replace('€', '').strip()
+                    price_part = price_part.replace('€', '').replace('EUR', '').replace('Euro', '').strip()
                     # Replace comma with dot for decimal
                     price_part = price_part.replace(',', '.')
                     # Remove any non-numeric characters except dot
-                    import re
                     price_part = re.sub(r'[^\d.]', '', price_part)
                     if price_part:
-                        price = float(price_part)
+                        current_price = float(price_part)
                 except Exception as e:
                     logging.debug(f"Price parsing failed for '{line}': {e}")
-                    price = 0.0
+                    current_price = 0.0
+        
+        # Save last product if exists
+        if current_product and current_price is not None:
+            products.append((current_product, current_price))
+        
+        # Fallback: if no products found, try old format
+        if not products:
+            product_name = item_title
+            price = 0.0
+            for line in text.split('\n'):
+                line = line.strip()
+                if 'PRODUKT:' in line.upper() and ':' in line:
+                    product_name = line.split(':', 1)[1].strip()
+                elif 'PREIS:' in line.upper() and ':' in line:
+                    try:
+                        price_part = line.split(':', 1)[1].strip()
+                        price_part = price_part.replace('€', '').replace('EUR', '').replace('Euro', '').strip()
+                        price_part = price_part.replace(',', '.')
+                        price_part = re.sub(r'[^\d.]', '', price_part)
+                        if price_part:
+                            price = float(price_part)
+                    except:
+                        pass
+            if price > 0:
+                products = [(product_name, price)]
+        
+        # If still no products, return default
+        if not products:
+            products = [(item_title, 0.0)]
+        
+        # Return first product for backward compatibility, but log all products
+        if len(products) > 1:
+            logging.info(f"Gemini found {len(products)} products: {[p[0][:30] for p in products]}")
+        
+        product_name, price = products[0]
         
         # Fallback: Only use regex if Gemini returned price 0 (might be non-physical product or parsing error)
         # But only if we're sure it's a physical product based on keywords
@@ -495,24 +572,52 @@ PREIS: 0"""
                         except:
                             continue
         
-        logging.info(f"Gemini extraction: '{item_title[:50]}' -> Product: '{product_name[:50]}', Price: {price}€")
-        return product_name, price
+        # Log extraction results
+        if len(products) > 0:
+            product_names = ', '.join([p[0][:30] for p in products])
+            logging.info(f"Gemini extraction: '{item_title[:50]}' -> Products: {product_names}, Prices: {[p[1] for p in products]}")
+        else:
+            logging.info(f"Gemini extraction: '{item_title[:50]}' -> No products found")
+        
+        return products if products else [(item_title, 0.0)]
     except Exception as e:
         logging.error(f"Gemini extraction error for '{item_title[:50]}': {e}")
-        return item_title, 0.0
+        return [(item_title, 0.0)]
 
 
 def clean_product_name_for_ebay(product_name):
-    """Clean product name for eBay API query - remove emojis and special characters"""
+    """Clean and optimize product name for eBay API query
+    Removes marketing text, keeps only essential product info"""
     if not product_name:
         return ""
+    
+    # Remove common marketing words that don't help with eBay search
+    marketing_words = [
+        r'\b(inkl\.?|inklusive|mit|und|plus|\+)\b',
+        r'\b(GRATIS|gratis|kostenlos|free)\b',
+        r'\b(Zugabeartikel|Geschenk|Bonus|Extra)\b',
+        r'\b(L-BOXX|LBOXX|Box|Karton|Verpackung)\b',
+        r'\b(Neu|NEU|neu|Original|ORIGINAL)\b',
+        r'\b(für|von|ab|bis|statt|jetzt|nur)\b',
+    ]
+    
+    cleaned = product_name
+    for pattern in marketing_words:
+        cleaned = re.sub(pattern, ' ', cleaned, flags=re.IGNORECASE)
+    
     # Remove emojis and special unicode characters
-    # Keep only alphanumeric, spaces, and common punctuation
-    cleaned = re.sub(r'[^\w\s\-.,()€$]', '', product_name)
-    # Remove multiple spaces
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    # Limit length
-    return cleaned[:100]
+    cleaned = re.sub(r'[^\w\s\-.,()€$]', '', cleaned)
+    
+    # Remove multiple spaces and dashes
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r'-+', '-', cleaned)
+    cleaned = cleaned.strip()
+    
+    # Remove leading/trailing dashes and dots
+    cleaned = cleaned.strip('.-')
+    
+    # Limit length (eBay works better with shorter queries)
+    return cleaned[:80]
 
 
 def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None):
@@ -825,51 +930,56 @@ def process_rss_feeds(force_time_window=False):
                         wait_time = int(os.getenv('GEMINI_RATE_LIMIT_SECONDS', '2'))
                         time.sleep(wait_time)  # Wait 2 seconds between requests for free tier (30 RPM limit)
                     
-                    # Extract product info with Gemini
-                    product_name, rss_price = extract_product_info_with_gemini(
+                    # Extract product info with Gemini (can return multiple products)
+                    products = extract_product_info_with_gemini(
                         entry.get('title', ''),
                         entry.get('description', '')
                     )
                     gemini_extractions += 1
                     
-                    if rss_price <= 0:
-                        continue
-                    
-                    gemini_with_price += 1
-                    
-                    # Get eBay market price (with tracking)
-                    ebay_price = get_ebay_market_price(product_name, log_id=current_log_id, rss_price=rss_price, source=source_url)
-                    ebay_queries += 1
-                    
-                    if ebay_price is None or ebay_price <= 0:
-                        continue
-                    
-                    ebay_found += 1
-                    
-                    # Calculate profit
-                    profit = ebay_price - rss_price
-                    
-                    # Check if profit > 15€
-                    if profit > 15:
-                        deal = {
-                            "source": source_url,
-                            "product_name": product_name,
-                            "product_url": entry.get('link', ''),
-                            "rss_price": float(rss_price),
-                            "ebay_price": float(ebay_price),
-                            "profit": float(profit),
-                            "ebay_fees": float(ebay_price * 0.10),
-                            "rss_item_title": entry.get('title', ''),
-                            "rss_item_link": entry.get('link', '')
-                        }
+                    # Process each product found by Gemini
+                    for product_name, rss_price in products:
+                        if rss_price <= 0:
+                            continue
                         
-                        # Save to database
-                        supabase.table('deals').insert(deal).execute()
-                        profitable_deals += 1
-                        total_deals_found += 1
+                        gemini_with_price += 1
                         
-                        # Send email alert
-                        send_email_alert(deal)
+                        # Get eBay market price (with tracking)
+                        ebay_price = get_ebay_market_price(product_name, log_id=current_log_id, rss_price=rss_price, source=source_url)
+                        ebay_queries += 1
+                        
+                        if ebay_price is None or ebay_price <= 0:
+                            continue
+                        
+                        ebay_found += 1
+                        
+                        # Calculate profit
+                        profit = ebay_price - rss_price
+                        
+                        # Check if profit > 15€
+                        if profit > 15:
+                            deal = {
+                                "source": source_url,
+                                "product_name": product_name,
+                                "product_url": entry.get('link', ''),
+                                "rss_price": float(rss_price),
+                                "ebay_price": float(ebay_price),
+                                "profit": float(profit),
+                                "ebay_fees": float(ebay_price * 0.10),
+                                "rss_item_title": entry.get('title', ''),
+                                "rss_item_link": entry.get('link', '')
+                            }
+                            
+                            # Save to database
+                            supabase.table('deals').insert(deal).execute()
+                            profitable_deals += 1
+                            total_deals_found += 1
+                            
+                            # Send email alert
+                            try:
+                                send_email_alert(deal)
+                            except Exception as email_error:
+                                logging.error(f"Failed to send email alert: {email_error}")
                         
                 except Exception as e:
                     logging.error(f"Error processing entry: {e}")
