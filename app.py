@@ -296,18 +296,28 @@ def extract_product_info_with_gemini(item_title, item_description):
         if not gemini_model:
             return item_title, 0.0
         
-        prompt = f"""
-        Extrahiere aus folgendem RSS-Feed-Eintrag die Produktinformationen:
+        # Combine title and description
+        full_text = f"{item_title}\n{item_description[:1000]}"
         
-        Titel: {item_title}
-        Beschreibung: {item_description[:500]}
-        
-        Bitte gib mir im folgenden Format zurück:
-        PRODUKT: [Produktname]
-        PREIS: [Preis in Euro als Zahl ohne Währungssymbol]
-        
-        Wenn kein Preis gefunden wird, gib PREIS: 0 zurück.
-        """
+        prompt = f"""Du bist ein Experte für die Extraktion von Produktinformationen aus deutschen Deal-Seiten.
+
+Analysiere folgenden RSS-Feed-Eintrag und extrahiere den Produktnamen und Preis:
+
+{full_text}
+
+WICHTIG: 
+- Suche nach Preisen in verschiedenen Formaten: "19,99€", "19.99€", "19,99 €", "19.99 EUR", "19,99 Euro", "ab 19,99€", "statt 29,99€ jetzt 19,99€"
+- Wenn mehrere Preise vorhanden sind, nimm den niedrigsten/aktuellen Preis
+- Ignoriere Versandkosten
+- Wenn kein Preis gefunden wird, gib PREIS: 0 zurück
+
+Antworte NUR in diesem exakten Format (eine Zeile pro Feld):
+PRODUKT: [Produktname]
+PREIS: [Zahl ohne Währungssymbol, Punkt als Dezimaltrennzeichen]
+
+Beispiel:
+PRODUKT: Samsung Galaxy S23
+PREIS: 599.99"""
         
         response = gemini_model.generate_content(prompt)
         text = response.text
@@ -316,19 +326,53 @@ def extract_product_info_with_gemini(item_title, item_description):
         product_name = item_title
         price = 0.0
         
+        # Try multiple parsing strategies
         for line in text.split('\n'):
-            if 'PRODUKT:' in line:
-                product_name = line.split('PRODUKT:')[1].strip()
-            elif 'PREIS:' in line:
+            line = line.strip()
+            if 'PRODUKT:' in line.upper():
+                product_name = line.split(':', 1)[1].strip() if ':' in line else line.replace('PRODUKT', '').strip()
+            elif 'PREIS:' in line.upper():
                 try:
-                    price_str = line.split('PREIS:')[1].strip().replace('€', '').replace(',', '.').strip()
-                    price = float(price_str)
-                except:
+                    price_part = line.split(':', 1)[1].strip() if ':' in line else line.replace('PREIS', '').strip()
+                    # Remove currency symbols and clean
+                    price_part = price_part.replace('€', '').replace('EUR', '').replace('Euro', '').replace('€', '').strip()
+                    # Replace comma with dot for decimal
+                    price_part = price_part.replace(',', '.')
+                    # Remove any non-numeric characters except dot
+                    import re
+                    price_part = re.sub(r'[^\d.]', '', price_part)
+                    if price_part:
+                        price = float(price_part)
+                except Exception as e:
+                    logging.debug(f"Price parsing failed for '{line}': {e}")
                     price = 0.0
         
+        # Fallback: Try to find price directly in text using regex
+        if price == 0.0:
+            import re
+            # Look for common price patterns
+            price_patterns = [
+                r'(\d{1,3}(?:[.,]\d{2})?)\s*€',
+                r'€\s*(\d{1,3}(?:[.,]\d{2})?)',
+                r'(\d{1,3}[.,]\d{2})\s*(?:EUR|Euro)',
+                r'Preis[:\s]+(\d{1,3}(?:[.,]\d{2})?)',
+                r'(\d{1,3}[.,]\d{2})\s*Euro',
+            ]
+            for pattern in price_patterns:
+                matches = re.findall(pattern, full_text, re.IGNORECASE)
+                if matches:
+                    try:
+                        price_str = matches[0].replace(',', '.')
+                        price = float(price_str)
+                        logging.debug(f"Found price via regex: {price}€")
+                        break
+                    except:
+                        continue
+        
+        logging.debug(f"Gemini extraction: '{item_title[:50]}' -> Product: '{product_name[:50]}', Price: {price}€")
         return product_name, price
     except Exception as e:
-        logging.error(f"Gemini extraction error: {e}")
+        logging.error(f"Gemini extraction error for '{item_title[:50]}': {e}")
         return item_title, 0.0
 
 
