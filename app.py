@@ -643,13 +643,15 @@ def process_rss_feeds(force_time_window=False):
             latest_log = supabase.table('logs').select('id').eq('source', source_url).order('timestamp', desc=True).limit(1).execute()
             current_log_id = latest_log.data[0]['id'] if latest_log.data else None
             
-            # Process each entry with rate limiting (limit to first 20 to avoid timeout)
-            max_entries = 20  # Limit to avoid timeout
+            # Process each entry with rate limiting (limit to first 10 to avoid timeout and quota issues)
+            max_entries = int(os.getenv('MAX_ENTRIES_PER_FEED', '10'))  # Limit to avoid timeout and quota
             for idx, entry in enumerate(feed.entries[:max_entries]):
                 try:
                     # Rate limiting: wait between Gemini API calls to avoid quota issues
+                    # Free tier gemini-2.0-flash-lite: 30 RPM = 1 request every 2 seconds
                     if idx > 0:
-                        time.sleep(2)  # Wait 2 seconds between requests (reduced from 1s due to quota)
+                        wait_time = int(os.getenv('GEMINI_RATE_LIMIT_SECONDS', '2'))
+                        time.sleep(wait_time)  # Wait 2 seconds between requests for free tier (30 RPM limit)
                     
                     # Extract product info with Gemini
                     product_name, rss_price = extract_product_info_with_gemini(
