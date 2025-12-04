@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS deals (
 CREATE TABLE IF NOT EXISTS ebay_queries (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    log_id INTEGER REFERENCES logs(id),
+    log_id INTEGER,
     source VARCHAR(255) NOT NULL,
     product_name TEXT NOT NULL,
     rss_price DECIMAL(10, 2),
