@@ -335,25 +335,11 @@ def extract_product_info_with_gemini(item_title, item_description):
 def get_ebay_market_price(product_name):
     """Get average market price from eBay Browse API"""
     try:
-        # eBay Browse API endpoint
-        url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+        if not EBAY_APP_ID:
+            logging.warning("EBAY_APP_ID not set, skipping eBay query")
+            return None
         
-        headers = {
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_DE",
-            "X-EBAY-C-ENDUSERCTX": "affiliateCampaignId=<eBayPartnerNetworkId>"
-        }
-        
-        params = {
-            "q": product_name,
-            "limit": 20,
-            "filter": "conditions:{NEW|NEW_OTHER|NEW_WITH_DEFECT}"
-        }
-        
-        # Note: eBay API requires OAuth token, simplified here
-        # In production, you need to implement OAuth flow
-        # For now, using a simplified approach
-        
-        # Alternative: Use eBay Finding API (simpler, but deprecated)
+        # Use eBay Finding API (simpler, but deprecated)
         finding_url = "https://svcs.ebay.de/services/search/FindingService/v1"
         finding_params = {
             "OPERATION-NAME": "findCompletedItems",
@@ -361,7 +347,7 @@ def get_ebay_market_price(product_name):
             "SECURITY-APPNAME": EBAY_APP_ID,
             "RESPONSE-DATA-FORMAT": "JSON",
             "REST-PAYLOAD": "",
-            "keywords": product_name,
+            "keywords": product_name[:100],  # Limit length
             "itemFilter(0).name": "Condition",
             "itemFilter(0).value": "New",
             "itemFilter(1).name": "SoldItemsOnly",
@@ -383,7 +369,8 @@ def get_ebay_market_price(product_name):
                     price_value = float(current_price.get('__value__', 0))
                     if price_value > 0:
                         prices.append(price_value)
-            except:
+            except Exception as e:
+                logging.debug(f"Error parsing eBay response: {e}")
                 pass
             
             if prices:
@@ -391,11 +378,16 @@ def get_ebay_market_price(product_name):
                 # eBay fees: ~10% for most categories
                 fees = avg_price * 0.10
                 net_price = avg_price - fees
+                logging.debug(f"eBay query for '{product_name[:50]}': {len(prices)} items, avg={avg_price:.2f}€, net={net_price:.2f}€")
                 return net_price
+            else:
+                logging.debug(f"eBay query for '{product_name[:50]}': No prices found")
+        else:
+            logging.warning(f"eBay API returned status {response.status_code} for '{product_name[:50]}'")
         
         return None
     except Exception as e:
-        logging.error(f"eBay API error: {e}")
+        logging.error(f"eBay API error for '{product_name[:50] if product_name else 'unknown'}': {e}")
         return None
 
 
@@ -447,10 +439,18 @@ def process_rss_feeds():
         logging.info(f"Skipping cron job - outside time window (current hour: {current_hour})")
         return {"status": "skipped", "message": "Outside time window"}
     
-    products_found = 0
-    deals_found = 0
+    total_products_found = 0
+    total_deals_found = 0
     
     for source_url in RSS_SOURCES:
+        # Statistics for this feed
+        feed_products = 0
+        gemini_extractions = 0
+        gemini_with_price = 0
+        ebay_queries = 0
+        ebay_found = 0
+        profitable_deals = 0
+        
         try:
             # Create log entry
             log_entry = {
@@ -467,7 +467,8 @@ def process_rss_feeds():
             if feed.bozo:
                 raise Exception(f"Feed parsing error: {feed.bozo_exception}")
             
-            products_found = len(feed.entries)
+            feed_products = len(feed.entries)
+            total_products_found += feed_products
             
             # Process each entry
             for entry in feed.entries:
@@ -477,15 +478,21 @@ def process_rss_feeds():
                         entry.get('title', ''),
                         entry.get('description', '')
                     )
+                    gemini_extractions += 1
                     
                     if rss_price <= 0:
                         continue
                     
+                    gemini_with_price += 1
+                    
                     # Get eBay market price
                     ebay_price = get_ebay_market_price(product_name)
+                    ebay_queries += 1
                     
                     if ebay_price is None or ebay_price <= 0:
                         continue
+                    
+                    ebay_found += 1
                     
                     # Calculate profit
                     profit = ebay_price - rss_price
@@ -506,7 +513,8 @@ def process_rss_feeds():
                         
                         # Save to database
                         supabase.table('deals').insert(deal).execute()
-                        deals_found += 1
+                        profitable_deals += 1
+                        total_deals_found += 1
                         
                         # Send email alert
                         send_email_alert(deal)
@@ -515,14 +523,25 @@ def process_rss_feeds():
                     logging.error(f"Error processing entry: {e}")
                     continue
             
+            # Create detailed message
+            message_parts = [
+                f"Feed-Einträge: {feed_products}",
+                f"Gemini-Extraktionen: {gemini_extractions}",
+                f"Mit Preis gefunden: {gemini_with_price}",
+                f"eBay-Abfragen: {ebay_queries}",
+                f"eBay-Preise gefunden: {ebay_found}",
+                f"Profitabel (>15€): {profitable_deals}"
+            ]
+            detailed_message = " | ".join(message_parts)
+            
             # Update log entry (get latest log ID first)
             latest_log = supabase.table('logs').select('id').eq('source', source_url).order('timestamp', desc=True).limit(1).execute()
             if latest_log.data:
                 log_id = latest_log.data[0]['id']
                 supabase.table('logs').update({
                     "status": "Success",
-                    "products_found": products_found,
-                    "message": f"{deals_found} profitable Deals gefunden"
+                    "products_found": feed_products,
+                    "message": detailed_message
                 }).eq('id', log_id).execute()
             
         except Exception as e:
@@ -531,15 +550,17 @@ def process_rss_feeds():
             latest_log = supabase.table('logs').select('id').eq('source', source_url).order('timestamp', desc=True).limit(1).execute()
             if latest_log.data:
                 log_id = latest_log.data[0]['id']
+                error_message = f"Fehler: {str(e)} | Feed-Einträge: {feed_products}"
                 supabase.table('logs').update({
                     "status": "Error",
-                    "message": str(e)
+                    "products_found": feed_products,
+                    "message": error_message
                 }).eq('id', log_id).execute()
     
     return {
         "status": "success",
-        "products_found": products_found,
-        "deals_found": deals_found
+        "products_found": total_products_found,
+        "deals_found": total_deals_found
     }
 
 
