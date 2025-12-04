@@ -83,6 +83,7 @@ DASHBOARD_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ArbiBot Dashboard</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -202,7 +203,7 @@ DASHBOARD_TEMPLATE = """
                 </thead>
                 <tbody>
                     {% for log in logs %}
-                    <tr>
+                    <tr onclick="showEbayQueries({{ log.id }}, '{{ log.source }}')" style="cursor: pointer;" title="Klicken für eBay-Abfragen">
                         <td>{{ log.timestamp }}</td>
                         <td>{{ log.source }}</td>
                         <td><span class="status-{{ log.status.lower() }}">{{ log.status }}</span></td>
@@ -245,6 +246,14 @@ DASHBOARD_TEMPLATE = """
         </div>
     </div>
     
+    <div id="ebayModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; overflow-y: auto;">
+        <div style="background: white; margin: 50px auto; padding: 30px; border-radius: 10px; max-width: 900px; max-height: 80vh; overflow-y: auto;">
+            <h2>eBay-Abfragen für: <span id="modalSource"></span></h2>
+            <button onclick="closeEbayModal()" style="float: right; background: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer;">✕ Schließen</button>
+            <div id="ebayQueriesContent" style="margin-top: 20px;"></div>
+        </div>
+    </div>
+    
     <script>
         function showTab(tabName) {
             // Hide all tab contents
@@ -260,6 +269,48 @@ DASHBOARD_TEMPLATE = """
             // Add active class to clicked tab
             event.target.classList.add('active');
         }
+        
+        function showEbayQueries(logId, source) {
+            document.getElementById('modalSource').textContent = source;
+            document.getElementById('ebayModal').style.display = 'block';
+            document.getElementById('ebayQueriesContent').innerHTML = '<p>Lade eBay-Abfragen...</p>';
+            
+            fetch(`/api/ebay-queries/${logId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.queries && data.queries.length > 0) {
+                        let html = '<table style="width: 100%; margin-top: 20px;"><thead><tr><th>Produkt</th><th>RSS Preis</th><th>eBay Preis</th><th>Gewinn</th><th>eBay Items</th><th>Status</th></tr></thead><tbody>';
+                        data.queries.forEach(q => {
+                            html += `<tr>
+                                <td>${q.product_name || '-'}</td>
+                                <td>${q.rss_price ? q.rss_price.toFixed(2) + ' €' : '-'}</td>
+                                <td>${q.ebay_price ? q.ebay_price.toFixed(2) + ' €' : '-'}</td>
+                                <td>${q.profit ? q.profit.toFixed(2) + ' €' : '-'}</td>
+                                <td>${q.ebay_items_found || 0}</td>
+                                <td>${q.query_successful ? '<span style="color: green;">✓ Erfolg</span>' : '<span style="color: red;">✗ Fehler</span>'}</td>
+                            </tr>`;
+                        });
+                        html += '</tbody></table>';
+                        document.getElementById('ebayQueriesContent').innerHTML = html;
+                    } else {
+                        document.getElementById('ebayQueriesContent').innerHTML = '<p>Keine eBay-Abfragen für diesen Log-Eintrag gefunden.</p>';
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('ebayQueriesContent').innerHTML = '<p style="color: red;">Fehler beim Laden der eBay-Abfragen: ' + error + '</p>';
+                });
+        }
+        
+        function closeEbayModal() {
+            document.getElementById('ebayModal').style.display = 'none';
+        }
+        
+        // Close modal on outside click
+        document.getElementById('ebayModal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeEbayModal();
+            }
+        });
     </script>
 </body>
 </html>
@@ -402,7 +453,7 @@ PREIS: 599.99"""
         return item_title, 0.0
 
 
-def get_ebay_market_price(product_name):
+def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None):
     """Get average market price from eBay Browse API"""
     try:
         if not EBAY_APP_ID:
@@ -426,6 +477,9 @@ def get_ebay_market_price(product_name):
         }
         
         response = requests.get(finding_url, params=finding_params, timeout=10)
+        items_found = 0
+        ebay_price_result = None
+        error_msg = None
         
         if response.status_code == 200:
             data = response.json()
@@ -433,6 +487,7 @@ def get_ebay_market_price(product_name):
             
             try:
                 items = data.get('findCompletedItemsResponse', [{}])[0].get('searchResult', [{}])[0].get('item', [])
+                items_found = len(items)
                 for item in items:
                     selling_status = item.get('sellingStatus', [{}])[0]
                     current_price = selling_status.get('currentPrice', [{}])[0]
@@ -440,6 +495,7 @@ def get_ebay_market_price(product_name):
                     if price_value > 0:
                         prices.append(price_value)
             except Exception as e:
+                error_msg = str(e)
                 logging.debug(f"Error parsing eBay response: {e}")
                 pass
             
@@ -448,16 +504,56 @@ def get_ebay_market_price(product_name):
                 # eBay fees: ~10% for most categories
                 fees = avg_price * 0.10
                 net_price = avg_price - fees
+                ebay_price_result = net_price
                 logging.debug(f"eBay query for '{product_name[:50]}': {len(prices)} items, avg={avg_price:.2f}€, net={net_price:.2f}€")
-                return net_price
             else:
                 logging.debug(f"eBay query for '{product_name[:50]}': No prices found")
         else:
+            error_msg = f"HTTP {response.status_code}"
             logging.warning(f"eBay API returned status {response.status_code} for '{product_name[:50]}'")
         
-        return None
+        # Save eBay query to database for tracking
+        if log_id and supabase:
+            try:
+                profit = (ebay_price_result - rss_price) if (ebay_price_result and rss_price) else None
+                query_entry = {
+                    "log_id": log_id,
+                    "source": source or "",
+                    "product_name": product_name[:500],
+                    "rss_price": float(rss_price) if rss_price else None,
+                    "ebay_price": float(ebay_price_result) if ebay_price_result else None,
+                    "ebay_items_found": items_found,
+                    "profit": float(profit) if profit else None,
+                    "query_successful": ebay_price_result is not None,
+                    "error_message": error_msg
+                }
+                supabase.table('ebay_queries').insert(query_entry).execute()
+            except Exception as e:
+                logging.error(f"Failed to save eBay query: {e}")
+        
+        return ebay_price_result
     except Exception as e:
+        error_msg = str(e)
         logging.error(f"eBay API error for '{product_name[:50] if product_name else 'unknown'}': {e}")
+        
+        # Save error to database
+        if log_id and supabase:
+            try:
+                query_entry = {
+                    "log_id": log_id,
+                    "source": source or "",
+                    "product_name": product_name[:500] if product_name else "",
+                    "rss_price": float(rss_price) if rss_price else None,
+                    "ebay_price": None,
+                    "ebay_items_found": 0,
+                    "profit": None,
+                    "query_successful": False,
+                    "error_message": error_msg
+                }
+                supabase.table('ebay_queries').insert(query_entry).execute()
+            except:
+                pass
+        
         return None
 
 
@@ -565,17 +661,8 @@ def process_rss_feeds():
                     gemini_with_price += 1
                     
                     # Get eBay market price (with tracking)
-                    ebay_price = get_ebay_market_price(product_name, log_id=current_log_id, rss_price=rss_price)
+                    ebay_price = get_ebay_market_price(product_name, log_id=current_log_id, rss_price=rss_price, source=source_url)
                     ebay_queries += 1
-                    
-                    # Update source in eBay query if log_id exists
-                    if current_log_id and ebay_price:
-                        try:
-                            supabase.table('ebay_queries').update({
-                                "source": source_url
-                            }).eq('log_id', current_log_id).eq('product_name', product_name[:500]).order('timestamp', desc=True).limit(1).execute()
-                        except:
-                            pass
                     
                     if ebay_price is None or ebay_price <= 0:
                         continue
