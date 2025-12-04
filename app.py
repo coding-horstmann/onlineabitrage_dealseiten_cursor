@@ -88,7 +88,7 @@ session.mount("https://", adapter)
 
 # RSS Feed Sources
 RSS_SOURCES = [
-    'https://www.mydealz.de/rss/hot',
+    'https://www.mydealz.de/rss/alles',
     'https://www.dealdoktor.de/feed/',
     'https://schnaeppchenfuchs.com/rss'
 ]
@@ -515,7 +515,7 @@ def clean_product_name_for_ebay(product_name):
 
 def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None):
     """Get market price from eBay API with multiple price statistics (lowest, median, average)
-    Searches both New and Used items from the last 90 days"""
+    Searches only New items from the last 90 days"""
     try:
         if not EBAY_APP_ID:
             logging.warning("EBAY_APP_ID not set, skipping eBay query")
@@ -528,67 +528,93 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
             return None
         
         # Use eBay Finding API - search for completed items (sold items)
-        # Search both New and Used conditions to get more results
+        # Only search for "New" condition items
         finding_url = "https://svcs.ebay.de/services/search/FindingService/v1"
         
         all_prices = []
         items_found = 0
         error_msg = None
         
-        # Try both "New" and "Used" conditions to maximize results
-        for condition in ["New", "Used"]:
-            try:
-                finding_params = {
-                    "OPERATION-NAME": "findCompletedItems",
-                    "SERVICE-VERSION": "1.0.0",
-                    "SECURITY-APPNAME": EBAY_APP_ID,
-                    "RESPONSE-DATA-FORMAT": "JSON",
-                    "REST-PAYLOAD": "",
-                    "keywords": cleaned_name,
-                    "itemFilter(0).name": "Condition",
-                    "itemFilter(0).value": condition,
-                    "itemFilter(1).name": "SoldItemsOnly",
-                    "itemFilter(1).value": "true",
-                    # Search items sold in the last 90 days (more recent = more relevant)
-                    "itemFilter(2).name": "EndTimeFrom",
-                    "itemFilter(2).value": "",  # Will be set to 90 days ago
-                    "paginationInput.entriesPerPage": "50"  # Increased to get more data
-                }
+        # Search only for "New" condition items
+        try:
+            from datetime import datetime, timedelta
+            end_time_from = datetime.now() - timedelta(days=90)
+            
+            finding_params = {
+                "OPERATION-NAME": "findCompletedItems",
+                "SERVICE-VERSION": "1.0.0",
+                "SECURITY-APPNAME": EBAY_APP_ID,
+                "RESPONSE-DATA-FORMAT": "JSON",
+                "REST-PAYLOAD": "",
+                "keywords": cleaned_name,
+                "itemFilter(0).name": "Condition",
+                "itemFilter(0).value": "New",
+                "itemFilter(1).name": "SoldItemsOnly",
+                "itemFilter(1).value": "true",
+                # Search items sold in the last 90 days (more recent = more relevant)
+                "itemFilter(2).name": "EndTimeFrom",
+                "itemFilter(2).value": end_time_from.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "paginationInput.entriesPerPage": "50"  # Increased to get more data
+            }
+            
+            logging.debug(f"eBay query: '{cleaned_name}' (original: '{product_name[:50]}')")
+            
+            # Use session with retry strategy
+            response = session.get(finding_url, params=finding_params, timeout=15, verify=True)
+            
+            if response.status_code == 200:
+                data = response.json()
                 
-                # Set EndTimeFrom to 90 days ago
-                from datetime import datetime, timedelta
-                end_time_from = datetime.now() - timedelta(days=90)
-                finding_params["itemFilter(2).value"] = end_time_from.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                
-                # Use session with retry strategy
-                response = session.get(finding_url, params=finding_params, timeout=15, verify=True)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    try:
-                        items = data.get('findCompletedItemsResponse', [{}])[0].get('searchResult', [{}])[0].get('item', [])
-                        items_found += len(items)
-                        for item in items:
-                            selling_status = item.get('sellingStatus', [{}])[0]
-                            current_price = selling_status.get('currentPrice', [{}])[0]
-                            price_value = float(current_price.get('__value__', 0))
-                            if price_value > 0:
-                                all_prices.append(price_value)
-                    except Exception as e:
-                        if not error_msg:
-                            error_msg = str(e)
-                        logging.debug(f"Error parsing eBay response for {condition}: {e}")
+                # Check for API errors in response
+                if 'findCompletedItemsResponse' in data:
+                    response_data = data['findCompletedItemsResponse'][0]
+                    
+                    # Check for errors
+                    if 'errorMessage' in response_data:
+                        error_list = response_data['errorMessage']
+                        if error_list:
+                            error_msg = str(error_list[0].get('message', 'Unknown eBay API error'))
+                            logging.warning(f"eBay API error for '{cleaned_name}': {error_msg}")
+                    else:
+                        # Parse items
+                        try:
+                            search_result = response_data.get('searchResult', [{}])[0]
+                            items = search_result.get('item', [])
+                            items_found = len(items)
+                            
+                            logging.debug(f"eBay API returned {items_found} items for '{cleaned_name}'")
+                            
+                            for item in items:
+                                try:
+                                    selling_status = item.get('sellingStatus', [{}])[0]
+                                    current_price = selling_status.get('currentPrice', [{}])[0]
+                                    price_value = float(current_price.get('__value__', 0))
+                                    if price_value > 0:
+                                        all_prices.append(price_value)
+                                except Exception as item_error:
+                                    logging.debug(f"Error parsing item price: {item_error}")
+                                    continue
+                        except Exception as parse_error:
+                            error_msg = f"Parse error: {str(parse_error)}"
+                            logging.error(f"Error parsing eBay response for '{cleaned_name}': {parse_error}")
+                            # Log full response for debugging
+                            logging.debug(f"eBay API response: {str(data)[:500]}")
                 else:
-                    if not error_msg:
-                        error_msg = f"HTTP {response.status_code}"
-                    logging.debug(f"eBay API returned status {response.status_code} for {condition} items")
-                
-                # Small delay between requests to avoid rate limiting
-                time.sleep(0.5)
-            except Exception as e:
-                if not error_msg:
-                    error_msg = str(e)
-                logging.debug(f"Error querying eBay for {condition} items: {e}")
+                    error_msg = "Invalid response format from eBay API"
+                    logging.warning(f"eBay API returned unexpected format for '{cleaned_name}'")
+                    logging.debug(f"eBay API response: {str(data)[:500]}")
+            else:
+                error_msg = f"HTTP {response.status_code}"
+                logging.warning(f"eBay API returned status {response.status_code} for '{cleaned_name}'")
+                try:
+                    logging.debug(f"eBay API error response: {response.text[:500]}")
+                except:
+                    pass
+        except Exception as e:
+            error_msg = str(e)
+            logging.error(f"Error querying eBay for '{cleaned_name}': {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
         
         # Calculate price statistics
         ebay_price_result = None
@@ -619,7 +645,10 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
                         f"Avg: {price_stats['average']:.2f}€ | "
                         f"Net (median-fees): {net_price:.2f}€")
         else:
-            logging.debug(f"eBay query for '{product_name[:50]}': No prices found (searched New + Used)")
+            if error_msg:
+                logging.warning(f"eBay query for '{product_name[:50]}': No prices found - {error_msg}")
+            else:
+                logging.debug(f"eBay query for '{product_name[:50]}': No prices found (searched New items, last 90 days)")
         
         # Save eBay query to database for tracking
         if log_id and supabase:
