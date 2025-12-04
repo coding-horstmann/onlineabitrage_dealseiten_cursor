@@ -35,8 +35,13 @@ CREATE TABLE IF NOT EXISTS ebay_queries (
     source VARCHAR(255) NOT NULL,
     product_name TEXT NOT NULL,
     rss_price DECIMAL(10, 2),
-    ebay_price DECIMAL(10, 2),
+    ebay_price DECIMAL(10, 2), -- Deprecated: wird durch ebay_sold_price ersetzt
+    ebay_sold_price DECIMAL(10, 2), -- Medianpreis verkaufter Artikel
+    ebay_offer_price DECIMAL(10, 2), -- Niedrigster aktueller Angebotspreis
+    ebay_median_price DECIMAL(10, 2), -- Medianpreis verkaufter Artikel (alias für ebay_sold_price)
     ebay_items_found INTEGER DEFAULT 0,
+    ebay_sold_items_found INTEGER DEFAULT 0,
+    ebay_offer_items_found INTEGER DEFAULT 0,
     profit DECIMAL(10, 2),
     query_successful BOOLEAN DEFAULT false,
     error_message TEXT,

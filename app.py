@@ -297,14 +297,16 @@ DASHBOARD_TEMPLATE = """
                 .then(response => response.json())
                 .then(data => {
                     if (data.queries && data.queries.length > 0) {
-                        let html = '<table style="width: 100%; margin-top: 20px;"><thead><tr><th>Produkt</th><th>RSS Preis</th><th>eBay Preis</th><th>Gewinn</th><th>eBay Items</th><th>Status</th></tr></thead><tbody>';
+                        let html = '<table style="width: 100%; margin-top: 20px;"><thead><tr><th>Produkt</th><th>RSS Preis</th><th>Verkaufspreis</th><th>Angebotspreis</th><th>Medianpreis</th><th>Gewinn</th><th>eBay Items</th><th>Status</th></tr></thead><tbody>';
                         data.queries.forEach(q => {
                             html += `<tr>
                                 <td>${q.product_name || '-'}</td>
                                 <td>${q.rss_price ? q.rss_price.toFixed(2) + ' €' : '-'}</td>
-                                <td>${q.ebay_price ? q.ebay_price.toFixed(2) + ' €' : '-'}</td>
+                                <td>${q.ebay_sold_price ? q.ebay_sold_price.toFixed(2) + ' €' : '-'}</td>
+                                <td>${q.ebay_offer_price ? q.ebay_offer_price.toFixed(2) + ' €' : '-'}</td>
+                                <td>${q.ebay_median_price ? q.ebay_median_price.toFixed(2) + ' €' : '-'}</td>
                                 <td>${q.profit ? q.profit.toFixed(2) + ' €' : '-'}</td>
-                                <td>${q.ebay_items_found || 0}</td>
+                                <td>${q.ebay_items_found || 0} (Verkauft: ${q.ebay_sold_items_found || 0}, Angebote: ${q.ebay_offer_items_found || 0})</td>
                                 <td>${q.query_successful ? '<span style="color: green;">✓ Erfolg</span>' : '<span style="color: red;">✗ Fehler</span>'}</td>
                             </tr>`;
                         });
@@ -514,8 +516,8 @@ def clean_product_name_for_ebay(product_name):
 
 
 def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None):
-    """Get market price from eBay API with multiple price statistics (lowest, median, average)
-    Searches only New items from the last 90 days"""
+    """Get market prices from eBay API: Verkaufspreis (median), Angebotspreis (lowest), Medianpreis (median sold)
+    Returns dict with: sold_price (median), offer_price (lowest current), median_price (same as sold_price)"""
     try:
         if not EBAY_APP_ID:
             logging.warning("EBAY_APP_ID not set, skipping eBay query")
@@ -527,20 +529,20 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
             logging.warning(f"Product name too short after cleaning: '{product_name[:50]}'")
             return None
         
-        # Use eBay Finding API - search for completed items (sold items)
-        # Only search for "New" condition items
         finding_url = "https://svcs.ebay.de/services/search/FindingService/v1"
+        from datetime import datetime, timedelta
         
-        all_prices = []
-        items_found = 0
+        # Results
+        sold_prices = []  # Verkaufte Artikel (für Verkaufspreis und Medianpreis)
+        offer_prices = []  # Aktuelle Angebote (für niedrigsten Angebotspreis)
+        sold_items_found = 0
+        offer_items_found = 0
         error_msg = None
         
-        # Search only for "New" condition items
+        # 1. Search for SOLD items (findCompletedItems) - für Verkaufspreis und Medianpreis
         try:
-            from datetime import datetime, timedelta
             end_time_from = datetime.now() - timedelta(days=90)
-            
-            finding_params = {
+            finding_params_sold = {
                 "OPERATION-NAME": "findCompletedItems",
                 "SERVICE-VERSION": "1.0.0",
                 "SECURITY-APPNAME": EBAY_APP_ID,
@@ -551,118 +553,120 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
                 "itemFilter(0).value": "New",
                 "itemFilter(1).name": "SoldItemsOnly",
                 "itemFilter(1).value": "true",
-                # Search items sold in the last 90 days (more recent = more relevant)
                 "itemFilter(2).name": "EndTimeFrom",
                 "itemFilter(2).value": end_time_from.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                "paginationInput.entriesPerPage": "50"  # Increased to get more data
+                "paginationInput.entriesPerPage": "50"
             }
             
-            logging.debug(f"eBay query: '{cleaned_name}' (original: '{product_name[:50]}')")
+            response_sold = session.get(finding_url, params=finding_params_sold, timeout=15, verify=True)
             
-            # Use session with retry strategy
-            response = session.get(finding_url, params=finding_params, timeout=15, verify=True)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Check for API errors in response
-                if 'findCompletedItemsResponse' in data:
-                    response_data = data['findCompletedItemsResponse'][0]
-                    
-                    # Check for errors
-                    if 'errorMessage' in response_data:
-                        error_list = response_data['errorMessage']
-                        if error_list:
-                            error_msg = str(error_list[0].get('message', 'Unknown eBay API error'))
-                            logging.warning(f"eBay API error for '{cleaned_name}': {error_msg}")
-                    else:
-                        # Parse items
+            if response_sold.status_code == 200:
+                data_sold = response_sold.json()
+                if 'findCompletedItemsResponse' in data_sold:
+                    response_data = data_sold['findCompletedItemsResponse'][0]
+                    if 'errorMessage' not in response_data:
                         try:
                             search_result = response_data.get('searchResult', [{}])[0]
                             items = search_result.get('item', [])
-                            items_found = len(items)
-                            
-                            logging.debug(f"eBay API returned {items_found} items for '{cleaned_name}'")
-                            
+                            sold_items_found = len(items)
                             for item in items:
                                 try:
                                     selling_status = item.get('sellingStatus', [{}])[0]
                                     current_price = selling_status.get('currentPrice', [{}])[0]
                                     price_value = float(current_price.get('__value__', 0))
                                     if price_value > 0:
-                                        all_prices.append(price_value)
-                                except Exception as item_error:
-                                    logging.debug(f"Error parsing item price: {item_error}")
+                                        sold_prices.append(price_value)
+                                except:
                                     continue
-                        except Exception as parse_error:
-                            error_msg = f"Parse error: {str(parse_error)}"
-                            logging.error(f"Error parsing eBay response for '{cleaned_name}': {parse_error}")
-                            # Log full response for debugging
-                            logging.debug(f"eBay API response: {str(data)[:500]}")
-                else:
-                    error_msg = "Invalid response format from eBay API"
-                    logging.warning(f"eBay API returned unexpected format for '{cleaned_name}'")
-                    logging.debug(f"eBay API response: {str(data)[:500]}")
-            else:
-                error_msg = f"HTTP {response.status_code}"
-                logging.warning(f"eBay API returned status {response.status_code} for '{cleaned_name}'")
-                try:
-                    logging.debug(f"eBay API error response: {response.text[:500]}")
-                except:
-                    pass
+                        except Exception as e:
+                            logging.debug(f"Error parsing sold items: {e}")
         except Exception as e:
-            error_msg = str(e)
-            logging.error(f"Error querying eBay for '{cleaned_name}': {e}")
-            import traceback
-            logging.debug(traceback.format_exc())
+            logging.debug(f"Error querying sold items: {e}")
         
-        # Calculate price statistics
-        ebay_price_result = None
-        price_stats = {}
+        # Small delay between requests
+        time.sleep(0.5)
         
-        if all_prices:
-            all_prices.sort()  # Sort for median calculation
-            price_stats = {
-                "lowest": min(all_prices),
-                "highest": max(all_prices),
-                "average": sum(all_prices) / len(all_prices),
-                "median": all_prices[len(all_prices) // 2] if len(all_prices) > 0 else 0,
-                "count": len(all_prices)
+        # 2. Search for CURRENT listings (findItemsAdvanced) - für niedrigsten Angebotspreis
+        try:
+            finding_params_offer = {
+                "OPERATION-NAME": "findItemsAdvanced",
+                "SERVICE-VERSION": "1.0.0",
+                "SECURITY-APPNAME": EBAY_APP_ID,
+                "RESPONSE-DATA-FORMAT": "JSON",
+                "REST-PAYLOAD": "",
+                "keywords": cleaned_name,
+                "itemFilter(0).name": "Condition",
+                "itemFilter(0).value": "New",
+                "itemFilter(1).name": "ListingType",
+                "itemFilter(1).value": "FixedPrice",  # Only "Buy It Now" items
+                "sortOrder": "PricePlusShippingLowest",  # Sort by lowest price
+                "paginationInput.entriesPerPage": "50"
             }
             
-            # Use median price as it's less affected by outliers
-            # Alternative: use average if you prefer
-            median_price = price_stats["median"]
+            response_offer = session.get(finding_url, params=finding_params_offer, timeout=15, verify=True)
             
-            # eBay fees: ~10% for most categories
-            fees = median_price * 0.10
-            net_price = median_price - fees
-            ebay_price_result = net_price
-            
-            logging.info(f"eBay query '{product_name[:50]}': {len(all_prices)} items | "
-                        f"Lowest: {price_stats['lowest']:.2f}€ | "
-                        f"Median: {price_stats['median']:.2f}€ | "
-                        f"Avg: {price_stats['average']:.2f}€ | "
-                        f"Net (median-fees): {net_price:.2f}€")
-        else:
-            if error_msg:
-                logging.warning(f"eBay query for '{product_name[:50]}': No prices found - {error_msg}")
-            else:
-                logging.debug(f"eBay query for '{product_name[:50]}': No prices found (searched New items, last 90 days)")
+            if response_offer.status_code == 200:
+                data_offer = response_offer.json()
+                if 'findItemsAdvancedResponse' in data_offer:
+                    response_data = data_offer['findItemsAdvancedResponse'][0]
+                    if 'errorMessage' not in response_data:
+                        try:
+                            search_result = response_data.get('searchResult', [{}])[0]
+                            items = search_result.get('item', [])
+                            offer_items_found = len(items)
+                            for item in items:
+                                try:
+                                    selling_status = item.get('sellingStatus', [{}])[0]
+                                    current_price = selling_status.get('currentPrice', [{}])[0]
+                                    price_value = float(current_price.get('__value__', 0))
+                                    if price_value > 0:
+                                        offer_prices.append(price_value)
+                                except:
+                                    continue
+                        except Exception as e:
+                            logging.debug(f"Error parsing offer items: {e}")
+        except Exception as e:
+            logging.debug(f"Error querying offer items: {e}")
+        
+        # Calculate prices
+        sold_price_median = None
+        offer_price_lowest = None
+        median_price = None
+        
+        if sold_prices:
+            sold_prices.sort()
+            sold_price_median = sold_prices[len(sold_prices) // 2]  # Median
+            median_price = sold_price_median  # Same as sold_price_median
+        
+        if offer_prices:
+            offer_price_lowest = min(offer_prices)  # Lowest current offer
+        
+        # Use sold_price_median for profit calculation (backward compatibility)
+        ebay_price_result = sold_price_median
+        
+        logging.info(f"eBay query '{product_name[:50]}': "
+                    f"Verkaufspreis (Median): {sold_price_median:.2f}€ ({len(sold_prices)} items) | "
+                    f"Angebotspreis (Niedrigster): {offer_price_lowest:.2f}€ ({len(offer_prices)} items) | "
+                    f"Medianpreis: {median_price:.2f}€" if median_price else "Keine Preise gefunden")
         
         # Save eBay query to database for tracking
         if log_id and supabase:
             try:
-                profit = (ebay_price_result - rss_price) if (ebay_price_result and rss_price) else None
+                profit = (sold_price_median - rss_price) if (sold_price_median and rss_price) else None
                 query_entry = {
                     "log_id": log_id,
                     "source": source or "",
                     "product_name": product_name[:500],
                     "rss_price": float(rss_price) if rss_price else None,
-                    "ebay_price": float(ebay_price_result) if ebay_price_result else None,
-                    "ebay_items_found": items_found,
+                    "ebay_price": float(sold_price_median) if sold_price_median else None,  # Backward compatibility
+                    "ebay_sold_price": float(sold_price_median) if sold_price_median else None,
+                    "ebay_offer_price": float(offer_price_lowest) if offer_price_lowest else None,
+                    "ebay_median_price": float(median_price) if median_price else None,
+                    "ebay_items_found": sold_items_found + offer_items_found,  # Total
+                    "ebay_sold_items_found": sold_items_found,
+                    "ebay_offer_items_found": offer_items_found,
                     "profit": float(profit) if profit else None,
-                    "query_successful": ebay_price_result is not None,
+                    "query_successful": sold_price_median is not None or offer_price_lowest is not None,
                     "error_message": error_msg
                 }
                 supabase.table('ebay_queries').insert(query_entry).execute()
@@ -683,7 +687,12 @@ def get_ebay_market_price(product_name, log_id=None, rss_price=None, source=None
                     "product_name": product_name[:500] if product_name else "",
                     "rss_price": float(rss_price) if rss_price else None,
                     "ebay_price": None,
+                    "ebay_sold_price": None,
+                    "ebay_offer_price": None,
+                    "ebay_median_price": None,
                     "ebay_items_found": 0,
+                    "ebay_sold_items_found": 0,
+                    "ebay_offer_items_found": 0,
                     "profit": None,
                     "query_successful": False,
                     "error_message": error_msg
