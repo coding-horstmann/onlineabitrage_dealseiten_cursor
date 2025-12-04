@@ -44,7 +44,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     try:
         # Remove trailing slash if present and ensure proper format
         supabase_url_clean = SUPABASE_URL.rstrip('/')
-        # Simple initialization without extra options
+        # Initialize Supabase client
         supabase = create_client(supabase_url_clean, SUPABASE_KEY)
         logging.info("Supabase initialized successfully")
     except Exception as e:
