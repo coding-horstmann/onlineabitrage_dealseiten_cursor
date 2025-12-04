@@ -348,6 +348,31 @@ def requires_auth(f):
 def extract_product_info_with_gemini(item_title, item_description, retry_count=0):
     """Extract product name and price using Gemini AI with rate limiting"""
     try:
+        # First try regex extraction (faster, no API calls)
+        import re
+        full_text = f"{item_title}\n{item_description[:1000]}"
+        price_patterns = [
+            r'(\d{1,3}(?:[.,]\d{2})?)\s*€',
+            r'€\s*(\d{1,3}(?:[.,]\d{2})?)',
+            r'(\d{1,3}[.,]\d{2})\s*(?:EUR|Euro)',
+            r'Preis[:\s]+(\d{1,3}(?:[.,]\d{2})?)',
+            r'(\d{1,3}[.,]\d{2})\s*Euro',
+            r'für\s+(\d{1,3}(?:[.,]\d{2})?)\s*€',
+            r'(\d{1,3}[.,]\d{2})\s*€\s*(?:inkl|versand|inkl\.|inklusive)',
+        ]
+        for pattern in price_patterns:
+            matches = re.findall(pattern, full_text, re.IGNORECASE)
+            if matches:
+                try:
+                    price_str = matches[0].replace(',', '.').strip()
+                    price = float(price_str)
+                    if price > 0 and price < 100000:  # Reasonable price range
+                        logging.info(f"✅ Regex price found: {price}€ for '{item_title[:60]}'")
+                        return item_title, price
+                except:
+                    continue
+        
+        # Fallback to Gemini only if regex fails
         if not gemini_model:
             return item_title, 0.0
         
