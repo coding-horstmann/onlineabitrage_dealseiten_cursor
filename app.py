@@ -790,7 +790,16 @@ def cron_job():
                 "message": "Unauthorized - Invalid secret token"
             }, 401
         
-        result = process_rss_feeds()
+        # Allow manual override of time window with ?force=true parameter
+        force_run = request.args.get('force', '').lower() == 'true'
+        
+        if force_run:
+            # Override time window check for manual testing
+            logging.info("Manual cron execution forced (time window check bypassed)")
+            result = process_rss_feeds(force_time_window=True)
+        else:
+            result = process_rss_feeds()
+        
         return {
             "status": "success",
             "result": result
