@@ -22,8 +22,12 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configuration
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+SUPABASE_URL = os.getenv('SUPABASE_URL', '').strip()
+SUPABASE_KEY = os.getenv('SUPABASE_KEY', '').strip()
+
+# Ensure SUPABASE_URL has https:// protocol
+if SUPABASE_URL and not SUPABASE_URL.startswith('http'):
+    SUPABASE_URL = f'https://{SUPABASE_URL}'
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 EBAY_APP_ID = os.getenv('EBAY_APP_ID')
 GMAIL_USER = os.getenv('GMAIL_USER')
