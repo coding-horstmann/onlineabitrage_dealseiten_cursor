@@ -895,7 +895,7 @@ def test_gemini():
             "status": "success",
             "gemini_working": True,
             "test_response": response.text[:200],
-            "gemini_model": "gemini-2.0-flash-exp"
+            "gemini_model": GEMINI_MODEL_NAME if 'GEMINI_MODEL_NAME' in globals() else "gemini-2.0-flash-lite"
         }, 200
     except Exception as e:
         return {
