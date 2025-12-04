@@ -817,16 +817,27 @@ def get_ebay_queries(log_id):
         if not supabase:
             return {"error": "Supabase not initialized"}, 500
         
-        queries_response = supabase.table('ebay_queries').select('*').eq('log_id', log_id).order('timestamp', desc=True).execute()
-        queries = queries_response.data if hasattr(queries_response, 'data') and queries_response.data else []
+        try:
+            queries_response = supabase.table('ebay_queries').select('*').eq('log_id', log_id).order('timestamp', desc=True).execute()
+            queries = queries_response.data if hasattr(queries_response, 'data') and queries_response.data else []
+        except Exception as table_error:
+            # Table might not exist yet - return empty list
+            logging.warning(f"ebay_queries table might not exist: {table_error}")
+            queries = []
         
         return {
             "log_id": log_id,
-            "queries": queries
+            "queries": queries,
+            "count": len(queries)
         }, 200
     except Exception as e:
+        logging.error(f"Error fetching eBay queries for log_id {log_id}: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         return {
-            "error": str(e)
+            "error": str(e),
+            "log_id": log_id,
+            "queries": []
         }, 500
 
 
