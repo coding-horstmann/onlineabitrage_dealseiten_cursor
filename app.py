@@ -33,12 +33,22 @@ BASIC_AUTH_USER = os.getenv('BASIC_AUTH_USER', 'admin')
 BASIC_AUTH_PASSWORD = os.getenv('BASIC_AUTH_PASSWORD', 'changeme')
 CRON_SECRET = os.getenv('CRON_SECRET', 'change-this-secret-token')
 
-# Initialize Supabase
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Initialize Supabase (lazy initialization)
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        logging.error(f"Failed to initialize Supabase: {e}")
 
-# Initialize Gemini AI
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+# Initialize Gemini AI (lazy initialization)
+gemini_model = None
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    except Exception as e:
+        logging.error(f"Failed to initialize Gemini: {e}")
 
 # RSS Feed Sources
 RSS_SOURCES = [
@@ -266,6 +276,9 @@ def requires_auth(f):
 def extract_product_info_with_gemini(item_title, item_description):
     """Extract product name and price using Gemini AI"""
     try:
+        if not gemini_model:
+            return item_title, 0.0
+        
         prompt = f"""
         Extrahiere aus folgendem RSS-Feed-Eintrag die Produktinformationen:
         
@@ -404,6 +417,12 @@ def send_email_alert(deal):
 
 def process_rss_feeds():
     """Main function to process RSS feeds and find arbitrage opportunities"""
+    if not supabase:
+        raise Exception("Supabase not initialized. Check SUPABASE_URL and SUPABASE_KEY.")
+    
+    if not gemini_model:
+        raise Exception("Gemini not initialized. Check GEMINI_API_KEY.")
+    
     current_hour = datetime.now().hour
     
     # Check if within allowed time window (8:00 - 20:00)
@@ -512,6 +531,9 @@ def process_rss_feeds():
 def dashboard():
     """Dashboard route with Live Logs and Winners views"""
     try:
+        if not supabase:
+            return "Error: Supabase not initialized. Check SUPABASE_URL and SUPABASE_KEY.", 500
+        
         # Get logs (last 100 entries)
         logs_response = supabase.table('logs').select('*').order('timestamp', desc=True).limit(100).execute()
         logs = logs_response.data if hasattr(logs_response, 'data') and logs_response.data else []
