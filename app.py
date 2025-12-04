@@ -540,12 +540,17 @@ def process_rss_feeds():
             feed_products = len(feed.entries)
             total_products_found += feed_products
             
-            # Process each entry with rate limiting
-            for idx, entry in enumerate(feed.entries):
+            # Get log ID for eBay queries tracking
+            latest_log = supabase.table('logs').select('id').eq('source', source_url).order('timestamp', desc=True).limit(1).execute()
+            current_log_id = latest_log.data[0]['id'] if latest_log.data else None
+            
+            # Process each entry with rate limiting (limit to first 20 to avoid timeout)
+            max_entries = 20  # Limit to avoid timeout
+            for idx, entry in enumerate(feed.entries[:max_entries]):
                 try:
                     # Rate limiting: wait between Gemini API calls to avoid quota issues
                     if idx > 0:
-                        time.sleep(1)  # Wait 1 second between requests
+                        time.sleep(2)  # Wait 2 seconds between requests (reduced from 1s due to quota)
                     
                     # Extract product info with Gemini
                     product_name, rss_price = extract_product_info_with_gemini(
@@ -559,9 +564,18 @@ def process_rss_feeds():
                     
                     gemini_with_price += 1
                     
-                    # Get eBay market price
-                    ebay_price = get_ebay_market_price(product_name)
+                    # Get eBay market price (with tracking)
+                    ebay_price = get_ebay_market_price(product_name, log_id=current_log_id, rss_price=rss_price)
                     ebay_queries += 1
+                    
+                    # Update source in eBay query if log_id exists
+                    if current_log_id and ebay_price:
+                        try:
+                            supabase.table('ebay_queries').update({
+                                "source": source_url
+                            }).eq('log_id', current_log_id).eq('product_name', product_name[:500]).order('timestamp', desc=True).limit(1).execute()
+                        except:
+                            pass
                     
                     if ebay_price is None or ebay_price <= 0:
                         continue
@@ -706,6 +720,27 @@ def cron_job():
 def health():
     """Health check endpoint"""
     return {"status": "ok"}, 200
+
+
+@app.route('/api/ebay-queries/<int:log_id>', methods=['GET'])
+@requires_auth
+def get_ebay_queries(log_id):
+    """Get eBay queries for a specific log entry"""
+    try:
+        if not supabase:
+            return {"error": "Supabase not initialized"}, 500
+        
+        queries_response = supabase.table('ebay_queries').select('*').eq('log_id', log_id).order('timestamp', desc=True).execute()
+        queries = queries_response.data if hasattr(queries_response, 'data') and queries_response.data else []
+        
+        return {
+            "log_id": log_id,
+            "queries": queries
+        }, 200
+    except Exception as e:
+        return {
+            "error": str(e)
+        }, 500
 
 
 @app.route('/debug', methods=['GET'])
